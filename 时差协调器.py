@@ -15,8 +15,72 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 APP_NAME = "时差协调器"
+BASE_DPI = 96
 WINDOW_WIDTH = 320
 WINDOW_HEIGHT = 220
+RESIZE_BORDER = 8
+
+
+def logical_to_physical(value, scale):
+    """把 96 DPI 下的逻辑尺寸换算为当前显示器的物理像素。"""
+    return max(1, int(round(float(value) * float(scale))))
+
+
+def physical_to_logical(value, scale):
+    """把物理像素换算为 96 DPI 下的逻辑尺寸。"""
+    if scale <= 0:
+        scale = 1.0
+    return float(value) / float(scale)
+
+
+def calculate_resize_geometry(start_geometry, delta, edges, min_size):
+    """根据拖动方向计算无边框窗口的新位置和尺寸。"""
+    start_x, start_y, start_width, start_height = start_geometry
+    delta_x, delta_y = delta
+    min_width, min_height = min_size
+    x, y = start_x, start_y
+    width, height = start_width, start_height
+
+    if "w" in edges:
+        x = start_x + delta_x
+        width = start_width - delta_x
+        if width < min_width:
+            width = min_width
+            x = start_x + start_width - min_width
+    elif "e" in edges:
+        width = max(min_width, start_width + delta_x)
+
+    if "n" in edges:
+        y = start_y + delta_y
+        height = start_height - delta_y
+        if height < min_height:
+            height = min_height
+            y = start_y + start_height - min_height
+    elif "s" in edges:
+        height = max(min_height, start_height + delta_y)
+
+    return int(x), int(y), int(width), int(height)
+
+
+def clamp_geometry_to_work_area(geometry, work_area, min_size):
+    """把窗口完整限制在目标显示器的可用工作区内。"""
+    x, y, width, height = geometry
+    left, top, right, bottom = work_area
+    min_width, min_height = min_size
+    available_width = max(1, right - left)
+    available_height = max(1, bottom - top)
+    width = min(max(width, min_width), available_width)
+    height = min(max(height, min_height), available_height)
+    x = min(max(x, left), right - width)
+    y = min(max(y, top), bottom - height)
+    return int(x), int(y), int(width), int(height)
+
+
+def normalize_logical_size(value, default):
+    """读取配置中的逻辑尺寸，并过滤布尔值、负数和无效类型。"""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return default
+    return max(default, int(round(value)))
 
 # 三套主题均只使用 tkinter 可直接呈现的纯色，确保打包时不需要外部素材。
 THEMES = {
@@ -99,6 +163,8 @@ def load_config():
         "autostart": False,
         "window_x": None,
         "window_y": None,
+        "window_width": WINDOW_WIDTH,
+        "window_height": WINDOW_HEIGHT,
     }
     path = get_config_path()
     try:
@@ -116,6 +182,12 @@ def load_config():
         defaults["target_city"] = "几内亚·卡纳克里"
     if defaults["theme"] not in THEMES:
         defaults["theme"] = "春日"
+    defaults["window_width"] = normalize_logical_size(
+        defaults.get("window_width"), WINDOW_WIDTH
+    )
+    defaults["window_height"] = normalize_logical_size(
+        defaults.get("window_height"), WINDOW_HEIGHT
+    )
     return defaults
 
 
@@ -168,22 +240,149 @@ def format_offset_difference(hours):
     return f"差{sign}{value}h"
 
 
+def get_window_dpi(window_id):
+    """读取窗口当前所在显示器的 DPI；旧版 Windows 回退到系统 DPI。"""
+    if sys.platform != "win32":
+        return BASE_DPI
+
+    try:
+        import ctypes
+
+        user32 = ctypes.windll.user32
+        get_dpi_for_window = getattr(user32, "GetDpiForWindow", None)
+        if get_dpi_for_window is not None:
+            get_dpi_for_window.argtypes = [ctypes.c_void_p]
+            get_dpi_for_window.restype = ctypes.c_uint
+            dpi = int(get_dpi_for_window(ctypes.c_void_p(window_id)))
+            if dpi > 0:
+                return dpi
+
+        get_dpi_for_system = getattr(user32, "GetDpiForSystem", None)
+        if get_dpi_for_system is not None:
+            get_dpi_for_system.restype = ctypes.c_uint
+            dpi = int(get_dpi_for_system())
+            if dpi > 0:
+                return dpi
+    except (AttributeError, OSError, TypeError, ValueError):
+        pass
+    return BASE_DPI
+
+
+def get_monitor_work_area(rectangle):
+    """返回离指定窗口矩形最近的显示器工作区，失败时返回 None。"""
+    if sys.platform != "win32":
+        return None
+
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class MonitorInfo(ctypes.Structure):
+            _fields_ = [
+                ("cbSize", wintypes.DWORD),
+                ("rcMonitor", wintypes.RECT),
+                ("rcWork", wintypes.RECT),
+                ("dwFlags", wintypes.DWORD),
+            ]
+
+        x, y, width, height = rectangle
+        window_rect = wintypes.RECT(x, y, x + width, y + height)
+        user32 = ctypes.windll.user32
+        monitor_from_rect = user32.MonitorFromRect
+        monitor_from_rect.argtypes = [ctypes.POINTER(wintypes.RECT), wintypes.DWORD]
+        monitor_from_rect.restype = ctypes.c_void_p
+        monitor = monitor_from_rect(ctypes.byref(window_rect), 2)
+        if not monitor:
+            return None
+
+        info = MonitorInfo()
+        info.cbSize = ctypes.sizeof(MonitorInfo)
+        get_monitor_info = user32.GetMonitorInfoW
+        get_monitor_info.argtypes = [ctypes.c_void_p, ctypes.POINTER(MonitorInfo)]
+        get_monitor_info.restype = wintypes.BOOL
+        if not get_monitor_info(monitor, ctypes.byref(info)):
+            return None
+        work = info.rcWork
+        return work.left, work.top, work.right, work.bottom
+    except (AttributeError, OSError, TypeError, ValueError):
+        return None
+
+
+def set_native_window_geometry(window_id, geometry):
+    """用绝对虚拟屏幕坐标设置窗口，支持位于主屏左侧/上方的显示器。"""
+    if sys.platform != "win32":
+        return False
+
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        x, y, width, height = geometry
+        user32 = ctypes.windll.user32
+        get_parent = user32.GetParent
+        get_parent.argtypes = [ctypes.c_void_p]
+        get_parent.restype = ctypes.c_void_p
+        native_window = get_parent(ctypes.c_void_p(window_id)) or window_id
+
+        set_window_pos = user32.SetWindowPos
+        set_window_pos.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            wintypes.UINT,
+        ]
+        set_window_pos.restype = wintypes.BOOL
+        flags = 0x0004 | 0x0010  # SWP_NOZORDER | SWP_NOACTIVATE
+        return bool(
+            set_window_pos(
+                ctypes.c_void_p(native_window),
+                None,
+                int(x),
+                int(y),
+                int(width),
+                int(height),
+                flags,
+            )
+        )
+    except (AttributeError, OSError, TypeError, ValueError):
+        return False
+
+
 class TimeCoordinator(tk.Tk):
     """时差协调器主窗口。"""
 
     def __init__(self):
         super().__init__()
         self.config_data = load_config()
+        self._pointer_mode = None
         self._drag_origin = None
+        self._resize_state = None
         self._save_job = None
         self._clock_job = None
+        self._configure_job = None
+        self._last_drawn_size = None
         self.frames = []
+        self.selector_containers = []
         self.role_widgets = {"primary": [], "muted": [], "time": [], "diff": []}
 
         self.title(APP_NAME)
         self.overrideredirect(True)
         self.attributes("-topmost", True)
-        self.resizable(False, False)
+        self.resizable(True, True)
+        self.update_idletasks()
+
+        self._dpi = get_window_dpi(self.winfo_id())
+        self._dpi_scale = self._dpi / BASE_DPI
+        self._logical_width = float(self.config_data["window_width"])
+        self._logical_height = float(self.config_data["window_height"])
+        try:
+            self.tk.call("tk", "scaling", self._dpi / 72.0)
+        except tk.TclError:
+            pass
+        self.minsize(self._px(WINDOW_WIDTH), self._px(WINDOW_HEIGHT))
 
         self.local_city = tk.StringVar(value=self.config_data["local_city"])
         self.target_city = tk.StringVar(value=self.config_data["target_city"])
@@ -203,13 +402,14 @@ class TimeCoordinator(tk.Tk):
         self.border_canvas = tk.Canvas(self, highlightthickness=0, bd=0)
         self.border_canvas.pack(fill="both", expand=True)
         self.content = tk.Frame(self, bd=0, highlightthickness=0)
-        self.content.place(x=12, y=9, width=WINDOW_WIDTH - 24, height=WINDOW_HEIGHT - 18)
         self.frames.append(self.content)
 
         self._build_ui()
-        self.apply_theme()
+        self._apply_layout_metrics()
+        self.bind("<Configure>", self._on_root_configure, add="+")
         self._place_window()
-        self._bind_dragging()
+        self.apply_theme()
+        self._bind_window_interactions()
         self.protocol("WM_DELETE_WINDOW", self.close_app)
 
         # 非 Windows 不显示错误，只禁用无效的自启选项。
@@ -218,6 +418,9 @@ class TimeCoordinator(tk.Tk):
             self.autostart_check.configure(state="disabled")
 
         self.after(0, self.update_clock)
+
+    def _px(self, logical_value):
+        return logical_to_physical(logical_value, self._dpi_scale)
 
     def _register_role(self, widget, role):
         self.role_widgets[role].append(widget)
@@ -229,10 +432,10 @@ class TimeCoordinator(tk.Tk):
         return frame
 
     def _build_ui(self):
-        top = self._new_frame(self.content)
+        top = self.top = self._new_frame(self.content)
         top.pack(fill="x", padx=8, pady=(4, 0))
 
-        title_label = self._register_role(
+        title_label = self.title_label = self._register_role(
             tk.Label(
                 top,
                 text=APP_NAME,
@@ -267,7 +470,7 @@ class TimeCoordinator(tk.Tk):
         )
         self.close_button.pack(side="right")
 
-        selector_row = self._new_frame(self.content)
+        selector_row = self.selector_row = self._new_frame(self.content)
         selector_row.pack(fill="x", padx=8, pady=(3, 0))
         local_box = self._make_selector(
             selector_row, "本地地区", self.local_city, 0
@@ -281,11 +484,13 @@ class TimeCoordinator(tk.Tk):
         self.divider_top = tk.Frame(self.content, height=1, bd=0)
         self.divider_top.pack(fill="x", padx=8, pady=(6, 0))
 
-        display = self._new_frame(self.content)
+        display = self.display = self._new_frame(self.content)
         display.pack(fill="both", expand=True, padx=8, pady=(0, 0))
-        target_time_label = self._register_role(
+        time_group = self.time_group = self._new_frame(display)
+        time_group.pack(expand=True)
+        target_time_label = self.target_time_label = self._register_role(
             tk.Label(
-                display,
+                time_group,
                 textvariable=self.target_time_text,
                 bd=0,
                 font=("Consolas", 28, "bold"),
@@ -294,9 +499,9 @@ class TimeCoordinator(tk.Tk):
         )
         target_time_label.pack()
 
-        target_date_label = self._register_role(
+        target_date_label = self.target_date_label = self._register_role(
             tk.Label(
-                display,
+                time_group,
                 textvariable=self.target_date_text,
                 bd=0,
                 font=("Consolas", 9),
@@ -308,9 +513,9 @@ class TimeCoordinator(tk.Tk):
         self.divider_bottom = tk.Frame(self.content, height=1, bd=0)
         self.divider_bottom.pack(fill="x", padx=8, pady=(0, 1))
 
-        bottom = self._new_frame(self.content)
+        bottom = self.bottom = self._new_frame(self.content)
         bottom.pack(fill="x", padx=8, pady=(0, 4))
-        local_detail_label = self._register_role(
+        local_detail_label = self.local_detail_label = self._register_role(
             tk.Label(
                 bottom,
                 textvariable=self.local_time_text,
@@ -321,7 +526,7 @@ class TimeCoordinator(tk.Tk):
             "muted",
         )
         local_detail_label.pack(side="left")
-        separator_label = self._register_role(
+        separator_label = self.separator_label = self._register_role(
             tk.Label(
                 bottom,
                 text=" · ",
@@ -331,7 +536,7 @@ class TimeCoordinator(tk.Tk):
             "muted",
         )
         separator_label.pack(side="left")
-        difference_label = self._register_role(
+        difference_label = self.difference_label = self._register_role(
             tk.Label(
                 bottom,
                 textvariable=self.difference_text,
@@ -355,12 +560,12 @@ class TimeCoordinator(tk.Tk):
 
         # 在背景、标题和时间区域拖动，避免与下拉框、按钮的点击冲突。
         self.drag_widgets = [
-            self,
             self.border_canvas,
             self.content,
             top,
             selector_row,
             display,
+            time_group,
             bottom,
             title_label,
             target_time_label,
@@ -370,8 +575,36 @@ class TimeCoordinator(tk.Tk):
             difference_label,
         ]
 
+    def _apply_layout_metrics(self):
+        """把逻辑间距按当前显示器 DPI 应用到现有控件。"""
+        outer_x = self._px(12)
+        outer_y = self._px(9)
+        inner = self._px(8)
+        self.content.place(
+            x=outer_x,
+            y=outer_y,
+            relwidth=1,
+            relheight=1,
+            width=-2 * outer_x,
+            height=-2 * outer_y,
+        )
+        self.top.pack_configure(padx=inner, pady=(self._px(4), 0))
+        self.theme_combo.pack_configure(padx=(self._px(8), 0))
+        self.selector_row.pack_configure(padx=inner, pady=(self._px(3), 0))
+        for container, column in self.selector_containers:
+            padding = (0, self._px(4)) if column == 0 else (self._px(4), 0)
+            container.grid_configure(padx=padding)
+        self.divider_top.configure(height=self._px(1))
+        self.divider_top.pack_configure(padx=inner, pady=(self._px(6), 0))
+        self.display.pack_configure(padx=inner, pady=(0, 0))
+        self.divider_bottom.configure(height=self._px(1))
+        self.divider_bottom.pack_configure(padx=inner, pady=(0, self._px(1)))
+        self.bottom.pack_configure(padx=inner, pady=(0, self._px(4)))
+        self.minsize(self._px(WINDOW_WIDTH), self._px(WINDOW_HEIGHT))
+
     def _make_selector(self, parent, label_text, variable, column):
         container = self._new_frame(parent)
+        self.selector_containers.append((container, column))
         padding = (0, 4) if column == 0 else (4, 0)
         container.grid(row=0, column=column, sticky="ew", padx=padding)
         parent.grid_columnconfigure(column, weight=1)
@@ -411,8 +644,8 @@ class TimeCoordinator(tk.Tk):
                 lightcolor=theme["border"],
                 darkcolor=theme["border"],
                 insertcolor=theme["primary"],
-                borderwidth=1,
-                padding=2,
+                borderwidth=self._px(1),
+                padding=self._px(2),
             )
             self.style.map(
                 style_name,
@@ -458,125 +691,331 @@ class TimeCoordinator(tk.Tk):
         )
         self._configure_combobox_styles(theme)
         self._draw_theme_border(name, theme)
+        self._last_drawn_size = (self.winfo_width(), self.winfo_height())
 
     def _draw_theme_border(self, name, theme):
         """绘制各主题的专属边框装饰。"""
         canvas = self.border_canvas
         canvas.delete("all")
-        width = WINDOW_WIDTH - 1
-        height = WINDOW_HEIGHT - 1
+        width = max(1, canvas.winfo_width() - 1)
+        height = max(1, canvas.winfo_height() - 1)
+        s = self._px
+        thin = max(1, s(1))
+        medium = max(1, s(2))
 
         if name == "春日":
             canvas.create_rectangle(
-                2, 2, width - 2, height - 2, outline=theme["border"], width=1
+                s(2), s(2), width - s(2), height - s(2),
+                outline=theme["border"], width=thin
             )
             canvas.create_rectangle(
-                6, 6, width - 6, height - 6, outline=theme["accent"], width=1
+                s(6), s(6), width - s(6), height - s(6),
+                outline=theme["accent"], width=thin
             )
-            self._draw_leaf_sprig(3, 3, 1, 1, theme["accent"])
+            self._draw_leaf_sprig(s(3), s(3), 1, 1, theme["accent"])
             self._draw_leaf_sprig(
-                width - 3, height - 3, -1, -1, theme["accent"]
+                width - s(3), height - s(3), -1, -1, theme["accent"]
             )
-            for x in (246, 252, 258, 264):
-                canvas.create_oval(x, 4, x + 2, 6, fill=theme["border"], outline="")
+            for distance in (73, 67, 61, 55):
+                top_x = width - s(distance)
+                bottom_x = s(distance - 2)
                 canvas.create_oval(
-                    width - x - 2,
-                    height - 6,
-                    width - x,
-                    height - 4,
+                    top_x, s(4), top_x + s(2), s(6),
+                    fill=theme["border"], outline=""
+                )
+                canvas.create_oval(
+                    bottom_x,
+                    height - s(6),
+                    bottom_x + s(2),
+                    height - s(4),
                     fill=theme["border"],
                     outline="",
                 )
         elif name == "机械":
-            points = [3, 10, 10, 3, width - 10, 3, width - 3, 10,
-                      width - 3, height - 10, width - 10, height - 3,
-                      10, height - 3, 3, height - 10]
-            inner = [7, 13, 13, 7, width - 13, 7, width - 7, 13,
-                     width - 7, height - 13, width - 13, height - 7,
-                     13, height - 7, 7, height - 13]
-            canvas.create_polygon(points, fill="", outline=theme["border"], width=2)
-            canvas.create_polygon(inner, fill="", outline="#2f383e", width=1)
-            for x, y in ((10, 10), (width - 10, 10), (10, height - 10),
-                         (width - 10, height - 10)):
-                canvas.create_oval(x - 3, y - 3, x + 3, y + 3,
-                                   outline=theme["border"], width=1)
-                canvas.create_oval(x - 1, y - 1, x + 1, y + 1,
-                                   fill=theme["accent2"], outline="")
-            for x in (22, 27, 32, width - 32, width - 27, width - 22):
-                canvas.create_line(x, 4, x, 8, fill=theme["accent2"], width=2)
-            canvas.create_line(3, 78, 8, 78, fill=theme["accent"], width=3)
-            canvas.create_line(width - 8, 78, width - 3, 78,
-                               fill=theme["accent"], width=3)
+            points = [s(3), s(10), s(10), s(3), width - s(10), s(3),
+                      width - s(3), s(10), width - s(3), height - s(10),
+                      width - s(10), height - s(3), s(10), height - s(3),
+                      s(3), height - s(10)]
+            inner = [s(7), s(13), s(13), s(7), width - s(13), s(7),
+                     width - s(7), s(13), width - s(7), height - s(13),
+                     width - s(13), height - s(7), s(13), height - s(7),
+                     s(7), height - s(13)]
+            canvas.create_polygon(
+                points, fill="", outline=theme["border"], width=medium
+            )
+            canvas.create_polygon(
+                inner, fill="", outline="#2f383e", width=thin
+            )
+            for x, y in ((s(10), s(10)), (width - s(10), s(10)),
+                         (s(10), height - s(10)),
+                         (width - s(10), height - s(10))):
+                canvas.create_oval(
+                    x - s(3), y - s(3), x + s(3), y + s(3),
+                    outline=theme["border"], width=thin
+                )
+                canvas.create_oval(
+                    x - s(1), y - s(1), x + s(1), y + s(1),
+                    fill=theme["accent2"], outline=""
+                )
+            ticks = (s(22), s(27), s(32),
+                     width - s(32), width - s(27), width - s(22))
+            for x in ticks:
+                canvas.create_line(
+                    x, s(4), x, s(8), fill=theme["accent2"], width=medium
+                )
+            canvas.create_line(
+                s(3), s(78), s(8), s(78),
+                fill=theme["accent"], width=max(1, s(3))
+            )
+            canvas.create_line(
+                width - s(8), s(78), width - s(3), s(78),
+                fill=theme["accent"], width=max(1, s(3))
+            )
         else:
             magenta = theme["accent2"]
             cyan = theme["accent"]
+            middle = width / 2
             # 不对称分段线与切角，让霓虹主题和春日主题拉开视觉距离。
-            canvas.create_line(3, 58, 3, 14, 14, 3, 104, 3,
-                               fill=magenta, width=2)
-            canvas.create_line(112, 3, width - 14, 3, width - 3, 14,
-                               width - 3, 47, fill=cyan, width=2)
-            canvas.create_line(width - 3, 56, width - 3, height - 14,
-                               width - 14, height - 3, 190, height - 3,
-                               fill=magenta, width=2)
-            canvas.create_line(166, height - 3, 154, height - 3,
-                               150, height - 10, 146, height - 1,
-                               141, height - 8, 137, height - 3,
-                               52, height - 3, fill=magenta, width=2)
-            canvas.create_line(48, height - 3, 14, height - 3, 3,
-                               height - 14, 3, 70, fill=cyan, width=2)
-            canvas.create_oval(width - 6, 50, width, 56,
-                               outline=magenta, width=2)
-            canvas.create_oval(46, height - 6, 52, height,
-                               outline=cyan, width=2)
+            canvas.create_line(
+                s(3), s(58), s(3), s(14), s(14), s(3), s(104), s(3),
+                fill=magenta, width=medium
+            )
+            canvas.create_line(
+                s(112), s(3), width - s(14), s(3), width - s(3), s(14),
+                width - s(3), s(47), fill=cyan, width=medium
+            )
+            canvas.create_line(
+                width - s(3), s(56), width - s(3), height - s(14),
+                width - s(14), height - s(3), middle + s(30), height - s(3),
+                fill=magenta, width=medium
+            )
+            canvas.create_line(
+                middle + s(6), height - s(3), middle - s(6), height - s(3),
+                middle - s(10), height - s(10), middle - s(14), height - s(1),
+                middle - s(19), height - s(8), middle - s(23), height - s(3),
+                s(52), height - s(3), fill=magenta, width=medium
+            )
+            canvas.create_line(
+                s(48), height - s(3), s(14), height - s(3), s(3),
+                height - s(14), s(3), s(70), fill=cyan, width=medium
+            )
+            canvas.create_oval(
+                width - s(6), s(50), width, s(56),
+                outline=magenta, width=medium
+            )
+            canvas.create_oval(
+                s(46), height - s(6), s(52), height,
+                outline=cyan, width=medium
+            )
 
     def _draw_leaf_sprig(self, x, y, dx, dy, color):
         """绘制小型枝叶角花，避免引入外部图片。"""
         canvas = self.border_canvas
-        canvas.create_line(x, y, x + 7 * dx, y + 6 * dy,
-                           fill=color, width=1, smooth=True)
+        canvas.create_line(
+            x, y, x + self._px(7) * dx, y + self._px(6) * dy,
+            fill=color, width=max(1, self._px(1)), smooth=True
+        )
         leaves = ((1, 1, 4, 3), (3, 3, 6, 5), (5, 5, 8, 7))
         for x1, y1, x2, y2 in leaves:
-            xa, xb = sorted((x + x1 * dx, x + x2 * dx))
-            ya, yb = sorted((y + y1 * dy, y + y2 * dy))
-            canvas.create_oval(xa, ya, xb, yb, outline=color, width=1)
+            xa, xb = sorted((x + self._px(x1) * dx, x + self._px(x2) * dx))
+            ya, yb = sorted((y + self._px(y1) * dy, y + self._px(y2) * dy))
+            canvas.create_oval(
+                xa, ya, xb, yb, outline=color, width=max(1, self._px(1))
+            )
 
     def _place_window(self):
         """恢复保存的位置；首次运行默认放在屏幕右上角。"""
-        self.update_idletasks()
-        max_x = max(0, self.winfo_screenwidth() - WINDOW_WIDTH)
-        max_y = max(0, self.winfo_screenheight() - WINDOW_HEIGHT)
+        width = self._px(self._logical_width)
+        height = self._px(self._logical_height)
+        min_size = (self._px(WINDOW_WIDTH), self._px(WINDOW_HEIGHT))
         saved_x = self.config_data.get("window_x")
         saved_y = self.config_data.get("window_y")
 
-        if isinstance(saved_x, int) and isinstance(saved_y, int):
-            x = min(max(saved_x, 0), max_x)
-            y = min(max(saved_y, 0), max_y)
+        has_saved_position = (
+            isinstance(saved_x, int) and not isinstance(saved_x, bool)
+            and isinstance(saved_y, int) and not isinstance(saved_y, bool)
+        )
+        if has_saved_position:
+            x, y = saved_x, saved_y
         else:
-            x = max(0, max_x - 16)
-            y = 16
-        self.geometry(f"{WINDOW_WIDTH}x{WINDOW_HEIGHT}+{x}+{y}")
+            x, y = 0, 0
 
-    def _bind_dragging(self):
+        work_area = self._get_work_area((x, y, width, height))
+        if not has_saved_position:
+            left, top, right, _bottom = work_area
+            offset = self._px(16)
+            x = right - width - offset
+            y = top + offset
+
+        x, y, width, height = clamp_geometry_to_work_area(
+            (x, y, width, height), work_area, min_size
+        )
+        self._set_window_geometry((x, y, width, height))
+        self.update_idletasks()
+        self._logical_width = physical_to_logical(width, self._dpi_scale)
+        self._logical_height = physical_to_logical(height, self._dpi_scale)
+
+    def _get_work_area(self, rectangle):
+        work_area = get_monitor_work_area(rectangle)
+        if work_area is not None:
+            return work_area
+        return 0, 0, self.winfo_screenwidth(), self.winfo_screenheight()
+
+    @staticmethod
+    def _format_geometry(width, height, x, y):
+        return f"{int(width)}x{int(height)}{int(x):+d}{int(y):+d}"
+
+    def _set_window_geometry(self, geometry):
+        x, y, width, height = geometry
+        if set_native_window_geometry(self.winfo_id(), geometry):
+            return
+        self.geometry(self._format_geometry(width, height, x, y))
+
+    def _on_root_configure(self, event):
+        if event.widget is not self or self._configure_job is not None:
+            return
+        self._configure_job = self.after_idle(self._process_root_configure)
+
+    def _process_root_configure(self):
+        self._configure_job = None
+        new_dpi = get_window_dpi(self.winfo_id())
+        if new_dpi != self._dpi:
+            self._apply_dpi_change(new_dpi)
+            return
+
+        width = max(1, self.winfo_width())
+        height = max(1, self.winfo_height())
+        if self._pointer_mode != "move":
+            self._logical_width = max(
+                WINDOW_WIDTH, physical_to_logical(width, self._dpi_scale)
+            )
+            self._logical_height = max(
+                WINDOW_HEIGHT, physical_to_logical(height, self._dpi_scale)
+            )
+        size = (width, height)
+        if size != self._last_drawn_size:
+            name = self.theme_name.get()
+            self._draw_theme_border(name, THEMES.get(name, THEMES["春日"]))
+            self._last_drawn_size = size
+
+    def _apply_dpi_change(self, new_dpi):
+        """跨显示器时保持逻辑尺寸不变，只改变清晰的物理像素尺寸。"""
+        self._dpi = max(BASE_DPI, int(new_dpi))
+        self._dpi_scale = self._dpi / BASE_DPI
+        try:
+            self.tk.call("tk", "scaling", self._dpi / 72.0)
+        except tk.TclError:
+            pass
+
+        self._apply_layout_metrics()
+        width = self._px(self._logical_width)
+        height = self._px(self._logical_height)
+        x, y = self.winfo_x(), self.winfo_y()
+        work_area = self._get_work_area((x, y, width, height))
+        geometry = clamp_geometry_to_work_area(
+            (x, y, width, height),
+            work_area,
+            (self._px(WINDOW_WIDTH), self._px(WINDOW_HEIGHT)),
+        )
+        self._set_window_geometry(geometry)
+        self._last_drawn_size = None
+        self.apply_theme()
+
+    def _bind_window_interactions(self):
         for widget in self.drag_widgets:
-            widget.bind("<ButtonPress-1>", self.start_drag)
-            widget.bind("<B1-Motion>", self.do_drag)
-            widget.bind("<ButtonRelease-1>", self.end_drag)
+            widget.bind("<ButtonPress-1>", self._on_pointer_press)
+            widget.bind("<B1-Motion>", self._on_pointer_drag)
+            widget.bind("<ButtonRelease-1>", self._on_pointer_release)
+        self.border_canvas.bind("<Motion>", self._on_border_motion, add="+")
+        self.border_canvas.bind("<Leave>", self._on_border_leave, add="+")
 
-    def start_drag(self, event):
+    def _resize_edges_at(self, x_root, y_root):
+        x = x_root - self.winfo_rootx()
+        y = y_root - self.winfo_rooty()
+        grip = self._px(RESIZE_BORDER)
+        width = self.winfo_width()
+        height = self.winfo_height()
+        vertical = "n" if y <= grip else "s" if y >= height - grip else ""
+        horizontal = "w" if x <= grip else "e" if x >= width - grip else ""
+        return vertical + horizontal
+
+    def _set_resize_cursor(self, edges):
+        cursor_map = {
+            "n": "sb_v_double_arrow",
+            "s": "sb_v_double_arrow",
+            "e": "sb_h_double_arrow",
+            "w": "sb_h_double_arrow",
+            "nw": "size_nw_se",
+            "se": "size_nw_se",
+            "ne": "size_ne_sw",
+            "sw": "size_ne_sw",
+        }
+        cursor = cursor_map.get(edges, "arrow")
+        try:
+            self.border_canvas.configure(cursor=cursor)
+        except tk.TclError:
+            self.border_canvas.configure(cursor="sizing" if edges else "arrow")
+
+    def _on_border_motion(self, event):
+        if self._pointer_mode is None:
+            self._set_resize_cursor(self._resize_edges_at(event.x_root, event.y_root))
+
+    def _on_border_leave(self, _event):
+        if self._pointer_mode is None:
+            self._set_resize_cursor("")
+
+    def _on_pointer_press(self, event):
+        edges = self._resize_edges_at(event.x_root, event.y_root)
+        if edges:
+            self._pointer_mode = "resize"
+            self._resize_state = (
+                event.x_root,
+                event.y_root,
+                (self.winfo_x(), self.winfo_y(),
+                 self.winfo_width(), self.winfo_height()),
+                edges,
+            )
+            self._set_resize_cursor(edges)
+            return
+
+        self._pointer_mode = "move"
         self._drag_origin = (
             event.x_root - self.winfo_x(),
             event.y_root - self.winfo_y(),
         )
 
-    def do_drag(self, event):
-        if not self._drag_origin:
+    def _on_pointer_drag(self, event):
+        if self._pointer_mode == "resize" and self._resize_state:
+            start_x, start_y, start_geometry, edges = self._resize_state
+            geometry = calculate_resize_geometry(
+                start_geometry,
+                (event.x_root - start_x, event.y_root - start_y),
+                edges,
+                (self._px(WINDOW_WIDTH), self._px(WINDOW_HEIGHT)),
+            )
+            self._set_window_geometry(geometry)
             return
-        x = event.x_root - self._drag_origin[0]
-        y = event.y_root - self._drag_origin[1]
-        self.geometry(f"+{x}+{y}")
 
-    def end_drag(self, _event):
+        if self._pointer_mode == "move" and self._drag_origin:
+            x = event.x_root - self._drag_origin[0]
+            y = event.y_root - self._drag_origin[1]
+            self._set_window_geometry(
+                (x, y, self.winfo_width(), self.winfo_height())
+            )
+
+    def _on_pointer_release(self, event):
+        self._pointer_mode = None
         self._drag_origin = None
+        self._resize_state = None
+        self._logical_width = max(
+            WINDOW_WIDTH,
+            physical_to_logical(self.winfo_width(), self._dpi_scale),
+        )
+        self._logical_height = max(
+            WINDOW_HEIGHT,
+            physical_to_logical(self.winfo_height(), self._dpi_scale),
+        )
+        self._set_resize_cursor(self._resize_edges_at(event.x_root, event.y_root))
         self.schedule_save()
 
     def on_city_changed(self, _event=None):
@@ -633,6 +1072,14 @@ class TimeCoordinator(tk.Tk):
 
     def save_config(self):
         self._save_job = None
+        self._logical_width = max(
+            WINDOW_WIDTH,
+            physical_to_logical(self.winfo_width(), self._dpi_scale),
+        )
+        self._logical_height = max(
+            WINDOW_HEIGHT,
+            physical_to_logical(self.winfo_height(), self._dpi_scale),
+        )
         data = {
             "local_city": self.local_city.get(),
             "target_city": self.target_city.get(),
@@ -640,6 +1087,8 @@ class TimeCoordinator(tk.Tk):
             "autostart": bool(self.autostart.get()),
             "window_x": self.winfo_x(),
             "window_y": self.winfo_y(),
+            "window_width": int(round(self._logical_width)),
+            "window_height": int(round(self._logical_height)),
         }
         path = get_config_path()
         try:
@@ -655,18 +1104,43 @@ class TimeCoordinator(tk.Tk):
             self.after_cancel(self._save_job)
         if self._clock_job is not None:
             self.after_cancel(self._clock_job)
+        if self._configure_job is not None:
+            self.after_cancel(self._configure_job)
+            self._configure_job = None
         self.save_config()
         self.destroy()
 
 
 def enable_windows_dpi_awareness():
-    """让高 DPI 屏幕上的 Tk 窗口与字体更清晰；失败时不影响启动。"""
+    """优先启用 Per-Monitor V2；旧版 Windows 逐级回退。"""
     if sys.platform != "win32":
         return
     try:
         import ctypes
+        from ctypes import wintypes
 
-        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        set_context = ctypes.windll.user32.SetProcessDpiAwarenessContext
+        set_context.argtypes = [ctypes.c_void_p]
+        set_context.restype = wintypes.BOOL
+        if set_context(ctypes.c_void_p(-4)):
+            return
+    except (AttributeError, OSError, TypeError, ValueError):
+        pass
+
+    try:
+        import ctypes
+
+        if ctypes.windll.shcore.SetProcessDpiAwareness(2) == 0:
+            return
+        if ctypes.windll.shcore.SetProcessDpiAwareness(1) == 0:
+            return
+    except (AttributeError, OSError):
+        pass
+
+    try:
+        import ctypes
+
+        ctypes.windll.user32.SetProcessDPIAware()
     except (AttributeError, OSError):
         pass
 

@@ -1,0 +1,67 @@
+# 时差协调器
+
+一个使用 Python 标准库制作的 Windows 桌面时差小挂件，适合跨地区团队、港口业务和海外协作场景。
+
+## 界面主题
+
+| 春日 | 机械 | 霓虹 |
+| --- | --- | --- |
+| ![春日主题](screenshots/spring.png) | ![机械主题](screenshots/mechanical.png) | ![霓虹主题](screenshots/neon.png) |
+
+主题可在挂件顶部即时切换，并自动记住上次选择。
+
+## 功能
+
+- 无边框、始终置顶的小窗口，可拖动并自动记忆位置
+- 实时显示目标地区时间、日期、本地时间和真实 UTC 时差
+- 使用 `zoneinfo` 处理夏令时
+- 内置 23 个常见城市与港口时区
+- 春日、机械、霓虹三套主题
+- 当前用户开机自启设置
+- 配置保存到 `%APPDATA%\时差协调器\config.json`
+- 支持 PyInstaller 打包为单个 exe
+
+## 环境要求
+
+- Python 3.9+
+- Windows 10/11
+- `tzdata`（Windows 通常不自带 IANA 时区数据库）
+
+安装运行依赖：
+
+```powershell
+python -m pip install tzdata
+```
+
+## 直接运行
+
+```powershell
+python "时差协调器.py"
+```
+
+## 打包 exe
+
+先安装 PyInstaller：
+
+```powershell
+python -m pip install pyinstaller tzdata
+```
+
+然后执行：
+
+```powershell
+pyinstaller --onefile --noconsole --collect-all tzdata --name 时差协调器 时差协调器.py
+```
+
+生成文件位于 `dist\时差协调器.exe`。
+
+## 内置地区
+
+包括北京/上海、卡纳克里、黑角、弗里敦、阿克拉、吉布提市、达喀尔、阿比让、的黎波里、拉各斯、鹿特丹、汉堡、安特卫普、新加坡、迪拜、香港、釜山、东京、伦敦、巴黎、纽约、洛杉矶和悉尼。
+
+## 技术栈
+
+- GUI：`tkinter`
+- 时区：`zoneinfo`
+- Windows 自启：`winreg`
+- 打包：PyInstaller

@@ -1,0 +1,19 @@
+# Python 缓存
+__pycache__/
+*.py[cod]
+
+# PyInstaller 构建产物
+build/
+dist/
+*.spec
+
+# 本地设计 QA 产物
+qa-compare-*.png
+design-qa.md
+
+# 意外生成的本地缓存目录
+%SystemDrive%/
+
+# 系统文件
+.DS_Store
+Thumbs.db

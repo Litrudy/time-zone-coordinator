@@ -10,6 +10,13 @@
 
 主题可在挂件顶部即时切换，并自动记住上次选择。
 
+## 宠物系统
+
+- 点击顶部“宠物”可开启英短猫案例宠物，也可以随时关闭。
+- 英短猫会在挂件边框内侧移动，即使短暂挡住内容也不会跑到窗口外。
+- 宠物会随机切换移动、趴着睡觉、打招呼三种动作；每种动作使用至少 4 帧精灵图播放。
+- 宠物选择会随其他配置一起保存；点击游荡中的宠物也能快速打开选择菜单。
+
 ## 窗口调整
 
 - 拖动窗口内容空白区域可移动挂件。
@@ -26,6 +33,7 @@
 - 使用 `zoneinfo` 处理夏令时
 - 内置 23 个常见城市与港口时区
 - 春日、机械、霓虹三套主题
+- 英短猫案例宠物，支持移动、睡觉、打招呼三组四帧精灵动画
 - 当前用户开机自启设置
 - 配置保存到 `%APPDATA%\时差协调器\config.json`
 - 支持 PyInstaller 打包为单个 exe
@@ -59,7 +67,7 @@ python -m pip install pyinstaller tzdata
 然后执行：
 
 ```powershell
-pyinstaller --onefile --noconsole --collect-all tzdata --name 时差协调器 时差协调器.py
+pyinstaller --onefile --noconsole --collect-all tzdata --add-data "assets;assets" --name 时差协调器 时差协调器.py
 ```
 
 生成文件位于 `dist\时差协调器.exe`。

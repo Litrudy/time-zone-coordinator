@@ -5,10 +5,12 @@
 
 import json
 import os
+import random
 import subprocess
 import sys
 import tkinter as tk
 from datetime import datetime, timezone
+from fractions import Fraction
 from pathlib import Path
 from tkinter import messagebox, ttk
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -19,6 +21,25 @@ BASE_DPI = 96
 WINDOW_WIDTH = 320
 WINDOW_HEIGHT = 220
 RESIZE_BORDER = 8
+PET_OFF = "不显示"
+PET_TICK_MS = 60
+PET_WINDOW_KEY = "#01ff02"
+PET_NAME = "英短"
+PET_SLUG = "british-shorthair"
+PETS = {PET_NAME: PET_SLUG}
+PET_ACTIONS = ("walk", "sleep", "greet")
+PET_ACTION_FRAME_COUNT = 4
+PET_ACTION_FRAME_TICKS = {
+    "walk": 3,
+    "sleep": 8,
+    "greet": 4,
+}
+PET_ACTION_TICK_RANGES = {
+    "walk": (80, 150),
+    "sleep": (44, 76),
+    "greet": (24, 36),
+}
+PET_RANDOM_ACTIONS = ("walk", "walk", "walk", "sleep", "greet")
 
 
 def logical_to_physical(value, scale):
@@ -82,7 +103,27 @@ def normalize_logical_size(value, default):
         return default
     return max(default, int(round(value)))
 
-# 三套主题均只使用 tkinter 可直接呈现的纯色，确保打包时不需要外部素材。
+
+def pet_position_inside_border(window_geometry, sprite_size, distance, margin=10):
+    """让宠物在主窗口内部沿下边缘往返移动。"""
+    x, y, width, height = window_geometry
+    sprite_width, sprite_height = sprite_size
+    margin = max(0, int(margin))
+    travel = max(1, width - sprite_width - margin * 2)
+    phase = float(distance) % (travel * 2)
+
+    if phase <= travel:
+        pet_x = x + margin + phase
+        direction = "right"
+    else:
+        pet_x = x + margin + (travel * 2 - phase)
+        direction = "left"
+
+    pet_y = y + max(margin, height - sprite_height - margin)
+
+    return int(round(pet_x)), int(round(pet_y)), direction
+
+# 三套主题装饰均使用 tkinter 可直接呈现的纯色。
 THEMES = {
     "春日": {
         "bg": "#f7f5ec",
@@ -147,6 +188,12 @@ CITY_TIMEZONES = {
 }
 
 
+def resource_path(relative_path):
+    """返回源码运行或 PyInstaller 单文件运行时的资源路径。"""
+    base_dir = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    return base_dir / relative_path
+
+
 def get_config_path():
     """返回配置文件路径；没有 APPDATA 时使用用户主目录作为兜底。"""
     appdata = os.environ.get("APPDATA")
@@ -165,6 +212,7 @@ def load_config():
         "window_y": None,
         "window_width": WINDOW_WIDTH,
         "window_height": WINDOW_HEIGHT,
+        "pet": PET_OFF,
     }
     path = get_config_path()
     try:
@@ -182,6 +230,8 @@ def load_config():
         defaults["target_city"] = "几内亚·卡纳克里"
     if defaults["theme"] not in THEMES:
         defaults["theme"] = "春日"
+    if defaults.get("pet") not in PETS and defaults.get("pet") != PET_OFF:
+        defaults["pet"] = PET_OFF
     defaults["window_width"] = normalize_logical_size(
         defaults.get("window_width"), WINDOW_WIDTH
     )
@@ -363,6 +413,16 @@ class TimeCoordinator(tk.Tk):
         self._save_job = None
         self._clock_job = None
         self._configure_job = None
+        self._pet_job = None
+        self._pet_window = None
+        self._pet_label = None
+        self._pet_images = {}
+        self._pet_distance = 0.0
+        self._pet_direction = "right"
+        self._pet_action = "walk"
+        self._pet_action_ticks = 0
+        self._pet_frame_index = 0
+        self._pet_frame_ticks = 0
         self._last_drawn_size = None
         self.frames = []
         self.selector_containers = []
@@ -388,6 +448,7 @@ class TimeCoordinator(tk.Tk):
         self.target_city = tk.StringVar(value=self.config_data["target_city"])
         self.theme_name = tk.StringVar(value=self.config_data["theme"])
         self.autostart = tk.BooleanVar(value=bool(self.config_data["autostart"]))
+        self.pet_name = tk.StringVar(value=self.config_data["pet"])
         self.target_time_text = tk.StringVar(value="--:--:--")
         self.target_date_text = tk.StringVar(value="----/--/--")
         self.local_time_text = tk.StringVar(value="正在读取时区…")
@@ -418,6 +479,7 @@ class TimeCoordinator(tk.Tk):
             self.autostart_check.configure(state="disabled")
 
         self.after(0, self.update_clock)
+        self.after(80, self._apply_pet_selection)
 
     def _px(self, logical_value):
         return logical_to_physical(logical_value, self._dpi_scale)
@@ -469,6 +531,34 @@ class TimeCoordinator(tk.Tk):
             font=("Microsoft YaHei UI", 11, "bold"),
         )
         self.close_button.pack(side="right")
+
+        self.pet_button = tk.Menubutton(
+            top,
+            text="宠物",
+            relief="flat",
+            bd=0,
+            width=4,
+            cursor="hand2",
+            indicatoron=False,
+            font=("Microsoft YaHei UI", 8),
+        )
+        self.pet_button.pack(side="right", padx=(0, 2))
+        self.pet_menu = tk.Menu(self.pet_button, tearoff=False)
+        self.pet_button.configure(menu=self.pet_menu)
+        self.pet_menu.add_radiobutton(
+            label="关闭宠物",
+            value=PET_OFF,
+            variable=self.pet_name,
+            command=self.on_pet_changed,
+        )
+        self.pet_menu.add_separator()
+        self.pet_menu.add_command(label="案例宠物", state="disabled")
+        self.pet_menu.add_radiobutton(
+            label="  英短猫",
+            value=PET_NAME,
+            variable=self.pet_name,
+            command=self.on_pet_changed,
+        )
 
         selector_row = self.selector_row = self._new_frame(self.content)
         selector_row.pack(fill="x", padx=8, pady=(3, 0))
@@ -590,6 +680,7 @@ class TimeCoordinator(tk.Tk):
         )
         self.top.pack_configure(padx=inner, pady=(self._px(4), 0))
         self.theme_combo.pack_configure(padx=(self._px(8), 0))
+        self.pet_button.pack_configure(padx=(0, self._px(2)))
         self.selector_row.pack_configure(padx=inner, pady=(self._px(3), 0))
         for container, column in self.selector_containers:
             padding = (0, self._px(4)) if column == 0 else (self._px(4), 0)
@@ -681,6 +772,22 @@ class TimeCoordinator(tk.Tk):
             fg=theme["primary"],
             activebackground=theme["danger"],
             activeforeground="#ffffff",
+        )
+        self.pet_button.configure(
+            bg=theme["bg"],
+            fg=theme["primary"],
+            activebackground=theme["surface"],
+            activeforeground=theme["accent"],
+        )
+        self.pet_menu.configure(
+            bg=theme["control"],
+            fg=theme["primary"],
+            activebackground=theme["surface"],
+            activeforeground=theme["accent"],
+            disabledforeground=theme["muted"],
+            selectcolor=theme["accent"],
+            activeborderwidth=0,
+            bd=self._px(1),
         )
         self.autostart_check.configure(
             bg=theme["bg"],
@@ -920,6 +1027,12 @@ class TimeCoordinator(tk.Tk):
         self._set_window_geometry(geometry)
         self._last_drawn_size = None
         self.apply_theme()
+        if self.pet_name.get() != PET_OFF:
+            self._load_pet_images()
+            if self._pet_label is not None:
+                image = self._current_pet_image()
+                if image is not None:
+                    self._pet_label.configure(image=image)
 
     def _bind_window_interactions(self):
         for widget in self.drag_widgets:
@@ -1026,6 +1139,172 @@ class TimeCoordinator(tk.Tk):
         self.apply_theme()
         self.schedule_save()
 
+    def on_pet_changed(self):
+        self._apply_pet_selection()
+        self.schedule_save()
+
+    def _load_pet_images(self):
+        pet_slug = PETS.get(self.pet_name.get())
+        if not pet_slug:
+            self._pet_images = {}
+            return
+
+        scale = Fraction(max(1.0, self._dpi_scale)).limit_denominator(4)
+        images = {}
+        for action in PET_ACTIONS:
+            images[action] = {}
+            for direction, direction_suffix in (("right", ""), ("left", "-left")):
+                path = resource_path(
+                    f"assets/pets/{pet_slug}-{action}-sheet{direction_suffix}.png"
+                )
+                sheet = tk.PhotoImage(file=str(path))
+                frame_width = max(1, sheet.width() // PET_ACTION_FRAME_COUNT)
+                frames = []
+                for index in range(PET_ACTION_FRAME_COUNT):
+                    frame = tk.PhotoImage(width=frame_width, height=sheet.height())
+                    frame.tk.call(
+                        frame,
+                        "copy",
+                        sheet,
+                        "-from",
+                        index * frame_width,
+                        0,
+                        (index + 1) * frame_width,
+                        sheet.height(),
+                        "-to",
+                        0,
+                        0,
+                    )
+                    if scale.numerator != scale.denominator:
+                        frame = frame.zoom(scale.numerator, scale.numerator).subsample(
+                            scale.denominator, scale.denominator
+                        )
+                    frames.append(frame)
+                images[action][direction] = frames
+        self._pet_images = images
+
+    def _start_pet_action(self, action):
+        self._pet_action = action
+        self._pet_frame_index = 0
+        self._pet_frame_ticks = 0
+        low, high = PET_ACTION_TICK_RANGES[action]
+        self._pet_action_ticks = random.randint(low, high)
+
+    def _choose_next_pet_action(self):
+        if self._pet_action != "walk":
+            return "walk"
+        return random.choice(PET_RANDOM_ACTIONS)
+
+    def _current_pet_image(self):
+        action_images = self._pet_images.get(self._pet_action)
+        if not action_images:
+            return None
+        frames = action_images.get(self._pet_direction) or action_images.get("right")
+        if not frames:
+            return None
+        self._pet_frame_index %= len(frames)
+        return frames[self._pet_frame_index]
+
+    def _apply_pet_selection(self):
+        if self._pet_job is not None:
+            self.after_cancel(self._pet_job)
+            self._pet_job = None
+        if self._pet_window is not None:
+            self._pet_window.destroy()
+            self._pet_window = None
+            self._pet_label = None
+
+        if self.pet_name.get() == PET_OFF:
+            self._pet_images = {}
+            return
+
+        try:
+            self._load_pet_images()
+        except (OSError, tk.TclError):
+            self.pet_name.set(PET_OFF)
+            self._pet_images = {}
+            return
+
+        pet_window = tk.Toplevel(self)
+        pet_window.overrideredirect(True)
+        pet_window.configure(bg=PET_WINDOW_KEY)
+        pet_window.attributes("-topmost", True)
+        try:
+            pet_window.attributes("-transparentcolor", PET_WINDOW_KEY)
+            pet_window.attributes("-toolwindow", True)
+        except tk.TclError:
+            pass
+
+        self._pet_window = pet_window
+        self._pet_label = tk.Label(
+            pet_window,
+            image=self._pet_images["walk"]["right"][0],
+            bg=PET_WINDOW_KEY,
+            bd=0,
+            highlightthickness=0,
+            cursor="hand2",
+        )
+        self._pet_label.pack()
+        self._pet_label.bind("<Button-1>", self._show_pet_menu)
+        self._pet_label.bind("<Button-3>", self._show_pet_menu)
+        self._pet_distance = 0.0
+        self._pet_direction = "right"
+        self._start_pet_action("walk")
+        self._animate_pet()
+
+    def _show_pet_menu(self, event):
+        try:
+            self.pet_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.pet_menu.grab_release()
+
+    def _animate_pet(self):
+        self._pet_job = None
+        if self._pet_window is None or not self._pet_images:
+            return
+
+        image = self._current_pet_image()
+        if image is None:
+            return
+        sprite_size = (image.width(), image.height())
+        window_geometry = (
+            self.winfo_x(),
+            self.winfo_y(),
+            self.winfo_width(),
+            self.winfo_height(),
+        )
+        pet_x, pet_y, direction = pet_position_inside_border(
+            window_geometry,
+            sprite_size,
+            self._pet_distance,
+            margin=self._px(10),
+        )
+
+        if direction != self._pet_direction:
+            self._pet_direction = direction
+            self._pet_frame_index = 0
+            self._pet_frame_ticks = 0
+
+        if self._pet_action == "walk":
+            self._pet_distance += max(1, self._px(1.25))
+
+        self._pet_frame_ticks += 1
+        if self._pet_frame_ticks >= PET_ACTION_FRAME_TICKS[self._pet_action]:
+            self._pet_frame_ticks = 0
+            frames = self._pet_images[self._pet_action][self._pet_direction]
+            self._pet_frame_index = (self._pet_frame_index + 1) % len(frames)
+
+        self._pet_action_ticks -= 1
+        if self._pet_action_ticks <= 0:
+            self._start_pet_action(self._choose_next_pet_action())
+
+        image = self._current_pet_image()
+        self._pet_label.configure(image=image)
+        self._pet_window.geometry(
+            self._format_geometry(image.width(), image.height(), pet_x, pet_y)
+        )
+        self._pet_job = self.after(PET_TICK_MS, self._animate_pet)
+
     def refresh_clock_display(self):
         """刷新目标时间、本地时间和当下的真实 UTC 时差。"""
         try:
@@ -1089,6 +1368,7 @@ class TimeCoordinator(tk.Tk):
             "window_y": self.winfo_y(),
             "window_width": int(round(self._logical_width)),
             "window_height": int(round(self._logical_height)),
+            "pet": self.pet_name.get(),
         }
         path = get_config_path()
         try:
@@ -1107,6 +1387,12 @@ class TimeCoordinator(tk.Tk):
         if self._configure_job is not None:
             self.after_cancel(self._configure_job)
             self._configure_job = None
+        if self._pet_job is not None:
+            self.after_cancel(self._pet_job)
+            self._pet_job = None
+        if self._pet_window is not None:
+            self._pet_window.destroy()
+            self._pet_window = None
         self.save_config()
         self.destroy()
 

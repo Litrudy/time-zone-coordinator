@@ -2,6 +2,7 @@ import importlib.util
 import json
 import tempfile
 import unittest
+import struct
 from pathlib import Path
 from unittest import mock
 
@@ -89,6 +90,53 @@ class ConfigCompatibilityTests(unittest.TestCase):
         config = self._load({"window_width": True, "window_height": 100})
         self.assertEqual(config["window_width"], 320)
         self.assertEqual(config["window_height"], 220)
+
+    def test_invalid_pet_is_disabled(self):
+        config = self._load({"pet": "小恐龙"})
+        self.assertEqual(config["pet"], APP.PET_OFF)
+
+
+class PetPositionTests(unittest.TestCase):
+    def _png_size(self, path):
+        with path.open("rb") as file:
+            self.assertEqual(file.read(8), b"\x89PNG\r\n\x1a\n")
+            file.read(8)
+            return struct.unpack(">II", file.read(8))
+
+    def test_british_shorthair_has_three_four_frame_sprite_sheets(self):
+        for action in APP.PET_ACTIONS:
+            for direction_suffix in ("", "-left"):
+                with self.subTest(action=action, direction=direction_suffix or "right"):
+                    path = APP.resource_path(
+                        f"assets/pets/british-shorthair-{action}"
+                        f"-sheet{direction_suffix}.png"
+                    )
+                    self.assertTrue(path.is_file())
+                    width, height = self._png_size(path)
+                    self.assertEqual(width % APP.PET_ACTION_FRAME_COUNT, 0)
+                    self.assertGreaterEqual(width // APP.PET_ACTION_FRAME_COUNT, 1)
+                    self.assertGreaterEqual(APP.PET_ACTION_FRAME_COUNT, 4)
+                    self.assertGreater(height, 0)
+
+    def test_pet_walks_right_then_left_inside_bottom_border(self):
+        geometry = (100, 80, 320, 220)
+        sprite = (64, 48)
+        first = APP.pet_position_inside_border(geometry, sprite, 0)
+        turning = APP.pet_position_inside_border(geometry, sprite, 236)
+        returning = APP.pet_position_inside_border(geometry, sprite, 280)
+
+        self.assertEqual(first, (110, 242, "right"))
+        self.assertEqual(turning, (346, 242, "right"))
+        self.assertEqual(returning, (302, 242, "left"))
+
+    def test_pet_position_stays_inside_window(self):
+        geometry = (100, 80, 320, 220)
+        sprite = (64, 48)
+        x, y, _direction = APP.pet_position_inside_border(geometry, sprite, 999)
+        self.assertGreaterEqual(x, geometry[0])
+        self.assertGreaterEqual(y, geometry[1])
+        self.assertLessEqual(x + sprite[0], geometry[0] + geometry[2])
+        self.assertLessEqual(y + sprite[1], geometry[1] + geometry[3])
 
 
 if __name__ == "__main__":

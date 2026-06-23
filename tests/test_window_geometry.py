@@ -103,20 +103,25 @@ class PetPositionTests(unittest.TestCase):
             file.read(8)
             return struct.unpack(">II", file.read(8))
 
-    def test_british_shorthair_has_three_four_frame_sprite_sheets(self):
-        for action in APP.PET_ACTIONS:
-            for direction_suffix in ("", "-left"):
-                with self.subTest(action=action, direction=direction_suffix or "right"):
-                    path = APP.resource_path(
-                        f"assets/pets/british-shorthair-{action}"
-                        f"-sheet{direction_suffix}.png"
-                    )
-                    self.assertTrue(path.is_file())
-                    width, height = self._png_size(path)
-                    self.assertEqual(width % APP.PET_ACTION_FRAME_COUNT, 0)
-                    self.assertGreaterEqual(width // APP.PET_ACTION_FRAME_COUNT, 1)
-                    self.assertGreaterEqual(APP.PET_ACTION_FRAME_COUNT, 4)
-                    self.assertGreater(height, 0)
+    def test_every_pet_has_three_four_frame_sprite_sheets(self):
+        for pet_name, slug in APP.PETS.items():
+            for action in APP.PET_ACTIONS:
+                for direction_suffix in ("", "-left"):
+                    with self.subTest(
+                        pet=pet_name,
+                        action=action,
+                        direction=direction_suffix or "right",
+                    ):
+                        path = APP.resource_path(
+                            f"assets/pets/{slug}-{action}-sheet"
+                            f"{direction_suffix}.png"
+                        )
+                        self.assertTrue(path.is_file())
+                        width, height = self._png_size(path)
+                        self.assertEqual(width % APP.PET_ACTION_FRAME_COUNT, 0)
+                        self.assertGreaterEqual(width // APP.PET_ACTION_FRAME_COUNT, 1)
+                        self.assertGreaterEqual(APP.PET_ACTION_FRAME_COUNT, 4)
+                        self.assertGreater(height, 0)
 
     def test_pet_walks_right_then_left_inside_bottom_border(self):
         geometry = (100, 80, 320, 220)

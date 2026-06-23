@@ -25,8 +25,20 @@ PET_OFF = "不显示"
 PET_TICK_MS = 60
 PET_WINDOW_KEY = "#01ff02"
 PET_NAME = "英短"
-PET_SLUG = "british-shorthair"
-PETS = {PET_NAME: PET_SLUG}
+PETS = {
+    "英短": "british-shorthair",
+    "三花": "calico",
+    "萨摩耶": "samoyed",
+}
+PET_LABELS = {
+    "英短": "英短猫",
+    "三花": "三花猫",
+    "萨摩耶": "萨摩耶",
+}
+PET_GROUPS = (
+    ("猫科", ("英短", "三花")),
+    ("犬科", ("萨摩耶",)),
+)
 PET_ACTIONS = ("walk", "sleep", "greet")
 PET_ACTION_FRAME_COUNT = 4
 PET_ACTION_FRAME_TICKS = {
@@ -552,13 +564,17 @@ class TimeCoordinator(tk.Tk):
             command=self.on_pet_changed,
         )
         self.pet_menu.add_separator()
-        self.pet_menu.add_command(label="案例宠物", state="disabled")
-        self.pet_menu.add_radiobutton(
-            label="  英短猫",
-            value=PET_NAME,
-            variable=self.pet_name,
-            command=self.on_pet_changed,
-        )
+        for group_index, (group_name, pet_names) in enumerate(PET_GROUPS):
+            if group_index:
+                self.pet_menu.add_separator()
+            self.pet_menu.add_command(label=group_name, state="disabled")
+            for pet in pet_names:
+                self.pet_menu.add_radiobutton(
+                    label=f"  {PET_LABELS[pet]}",
+                    value=pet,
+                    variable=self.pet_name,
+                    command=self.on_pet_changed,
+                )
 
         selector_row = self.selector_row = self._new_frame(self.content)
         selector_row.pack(fill="x", padx=8, pady=(3, 0))
@@ -1245,12 +1261,20 @@ class TimeCoordinator(tk.Tk):
             cursor="hand2",
         )
         self._pet_label.pack()
-        self._pet_label.bind("<Button-1>", self._show_pet_menu)
+        self._pet_label.bind("<Button-1>", self._greet_pet)
         self._pet_label.bind("<Button-3>", self._show_pet_menu)
         self._pet_distance = 0.0
         self._pet_direction = "right"
         self._start_pet_action("walk")
         self._animate_pet()
+
+    def _greet_pet(self, _event=None):
+        if not self._pet_images:
+            return
+        self._start_pet_action("greet")
+        image = self._current_pet_image()
+        if image is not None and self._pet_label is not None:
+            self._pet_label.configure(image=image)
 
     def _show_pet_menu(self, event):
         try:
